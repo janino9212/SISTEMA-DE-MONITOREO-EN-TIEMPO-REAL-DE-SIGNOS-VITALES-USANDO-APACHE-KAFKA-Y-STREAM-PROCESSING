@@ -1,0 +1,126 @@
+# Entorno de desarrollo: 3 brokers Kafka (KRaft), TimescaleDB, Grafana y Kafka UI.
+# Las aplicaciones Java se ejecutan desde IntelliJ y se conectan por localhost.
+# Los puertos se publican solo en 127.0.0.1 (RNF-20).
+
+x-kafka-comun: &kafka-comun
+  image: apache/kafka:3.9.0
+  restart: unless-stopped
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+services:
+  kafka-1:
+    <<: *kafka-comun
+    container_name: kafka-1
+    hostname: kafka-1
+    ports:
+      - "127.0.0.1:9092:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:19092,EXTERNAL://localhost:9092
+
+  kafka-2:
+    <<: *kafka-comun
+    container_name: kafka-2
+    hostname: kafka-2
+    ports:
+      - "127.0.0.1:9094:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:19092,EXTERNAL://localhost:9094
+
+  kafka-3:
+    <<: *kafka-comun
+    container_name: kafka-3
+    hostname: kafka-3
+    ports:
+      - "127.0.0.1:9096:9092"
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: INTERNAL://:19092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:19092,EXTERNAL://localhost:9096
+
+  # Crea los topics cuando el clúster está listo (6 particiones, replicación 3, retención 7 días).
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      - kafka-1
+      - kafka-2
+      - kafka-3
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for t in lecturas alertas; do
+          until /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:19092 --create --if-not-exists \
+              --topic $$t --partitions 6 --replication-factor 3 \
+              --config min.insync.replicas=2 --config retention.ms=604800000; do
+            echo "esperando al clúster para crear $$t..."; sleep 3
+          done
+        done
+        echo "topics listos"
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16   # fijar una versión concreta antes de las pruebas finales
+    container_name: timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TIMESCALE_USER}
+      POSTGRES_PASSWORD: ${TIMESCALE_PASSWORD}
+      POSTGRES_DB: ${TIMESCALE_DB}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./docker/timescale/init:/docker-entrypoint-initdb.d:ro
+
+  grafana:
+    image: grafana/grafana-oss:11.4.0
+    container_name: grafana
+    restart: unless-stopped
+    depends_on:
+      - timescaledb
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      TIMESCALE_DB: ${TIMESCALE_DB}
+      TIMESCALE_USER: ${TIMESCALE_USER}
+      TIMESCALE_PASSWORD: ${TIMESCALE_PASSWORD}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: unless-stopped
+    depends_on:
+      - kafka-1
+    environment:
+      KAFKA_CLUSTERS_0_NAME: vitales
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka-1:19092,kafka-2:19092,kafka-3:19092
+    ports:
+      - "127.0.0.1:8085:8080"
+
+volumes:
+  timescale-data:
+  grafana-data:
